@@ -1,0 +1,113 @@
+Manoila-Stoiculete Alexandru-Constantin 
+Grupa 322CD 
+
+Implementarea dataplane-ului unui router IPv4 in C, capabil sa proceseze pachete Ethernet, sa efectueze rutare bazata pe LPM (Longest Prefix Match), sa gestioneze dinamic tabela ARP si sa raspunda la mesaje ICMP.
+INSTRUCTIUNI REFERITOARE LA APELAREA FUNCTIILOR FOLOSITE SE POT GASI IN include/router.h  
+Toate pozele se gasesc in directorul screenshots
+Setup.png este setup-ul rulat inaintea oricarui test manual
+Am fost nevoit sa sterg un nr mare de poze deoarece dimensiunea arhivei era prea mare...
+
+Subiectul 1 - Procesul de dirijare
+La primirea unui pachet, routerul efectueaza urmatorii pasi:
+
+Se verifica daca pachetul este destinat routerului, adica daca MAC-ul destinatie corespunde interfetei pe care a sosit pachetul, sau daca este broadcast (FF:FF:FF:FF:FF:FF). Pachetele care nu indeplinesc aceasta conditie sunt ignorate.
+Se inspecteaza campul ethr_type din headerul Ethernet:
+Am definit un enum cu tipurile posibile de pachete in router.h, pe care l-am introdus in include/
+0x0800 -> IPv4
+0x0806 -> ARP Orice alt tip este ignorat.
+
+Pentru cazul IPv4: 
+Checksum-ul din header este salvat, campul este setat la 0, se recalculeaza si se compara cu valoarea originala. Daca nu coincid, pachetul este aruncat.
+Se verifica daca TTL <= 1. Daca durata de viata a  pachetului a expirat, se trimite un mesaj ICMP Time Exceeded si pachetul este aruncat.
+Se verifica apoi daca pachetul este destinat router-ului. Daca da, atunci router-ul stie sa raspunda doar 
+la icmp echo request (pentru asta vezi subiectul 4). Altfel, se face forwarding.
+
+Forwarding: 
+Se cauta cea mai buna ruta.
+Daca nu exista ruta, trimite un pachet de tip ICMP Destination Unreachable.
+Se verifica tabela ARP cache pentru next-hop:
+Daca exista intrarea: se actualizeaza MAC-urile Ethernet, se decrementeaza TTL, se recalculeaza checksum-ul IP si se trimite pachetul.
+Daca nu exista: pachetul este salvat in coada de asteptare si se trimite un ARP Request.
+
+Screenshots:
+Setup.png Reprezinta setup-ul rulat inaintea oricarui test manual. 
+Subiect_1_1.png Se trimite un pachet de tip ICMP echo request de la host 0 la host 3.
+In wireshark este deschisa interfata host-ului 3.
+Subiect_1_2.png Acelasi test din perspectiva router-ului. In wireshark este deschisa interfata r-0 
+a lui router0.
+
+Functii folosite
+Pe langa cele din API
+get_best_route
+send_icmp_reply
+forward_ipv4_packet
+send_arp_request
+get_arp_entry
+is_router_interface
+...
+
+
+
+Subiectul 2 - Longest Prefix Match eficient
+Implementarea LPM utilizeaza cautare binara O(log n) peste tabela de rutare pre-sortata, in loc de cautare liniara O(n). Acesta se afla in get_best_route
+Sortarea tabelei se realizeaza la initializare cu qsort, care ordoneaza intrarile crescator in functie de prefix iar mai apoi dupa masca (daca au acelasi prefix).
+
+Functii folosite
+compare_rtable 
+get_best_route
+qsort lmao
+
+Subiectul 3 - Protocolul ARP
+Tabela ARP este populata dinamic.
+
+Pentru ARP request (opcode 1):
+Se verifica daca IP-ul target este IP-ul interfetei pe care a sosit (Am folosit functia deja implementata - Identic cu ce am facut pentru construirea pachetelor ICMP echo reply la pachetele IPv4)
+MAC-urile Ethernet sunt inversate.
+MAC-urile din headerul ARP sunt actualizate.
+IP-urile sursa/destinatie ARP sunt inversate.
+opcode este setat la 2.
+
+Pentru ARP reply (opcode 2):
+Se adauga in tabela ARP cache (arp_table) o noua intrare cu IP-ul si MAC-ul sursei.
+Se parcurge coada de pachete in asteptare (arp_pending_queue):
+Pachetele al caror next_hop coincide cu IP-ul din reply sunt forwardate identic cu ce am facut la subiectul 1.
+Din cauza API-ului oferit pentru tema creez o coada noua in care pun restul pachetelor pentru care nu se face
+forwarding (Cozile sunt generice + black box...).
+Coada veche este eliberata din memorie, iar cea noua devine coada curenta.
+Pachetele fara intrare ARP in cache sunt salvate ca structuri waiting_packet (cu copie a buffer-ului, lungimea, interfata si next-hop-ul) in coada arp_pending_queue. Structura se poate gasi in include/router.h 
+
+Screenshots:
+Toate interfetele celor 2 routere au primit NOARP
+Subiect_3_1.png host0 trimite 3 arping-uri catre r-0.
+Subiect_3_2.png Wireshark dechis pe r-0. 
+
+Functii folosite
+send_arp_request
+send_arp_reply
+get_arp_entry
+
+Subiectul 4 - Protocolul ICMP
+Routerul genereaza mesaje ICMP in trei situatii, toate prin send_icmp_reply():
+
+ICMP Echo Reply (type 0, code 0) Declansat cand pachetul IPv4 are ca destinatie chiar interfata routerului (own_destination == 1) si protocolul encapsulat este ICMP (proto = 1).
+Se inverseaza adresele IP sursa/destinatie.
+Se inverseaza MAC-urile Ethernet.
+Se recalculeaza checksum-urile IP si ICMP.
+
+ICMP Time Exceeded (type 11, code 0) Declansat cand TTL <= 1.
+Se reconstruiesc headerele ip si icmp, iar noul payload o sa contina vechiul header ip + primii 8 bytes din 
+payload-ul original. 
+
+ICMP Destination Unreachable (type 3, code 0) Declansat cand nu exista o ruta in tabela de rutare pentru IP-ul destinatie.
+Aceeasi structura ca la Time Exceeded.
+
+Screenshots:
+Subiect_4_1.png host 1 trimite 3 icmp echo request cu ttl 1 
+Subiect_4_2.png router0 raspunde cu un icmp reply de tip time exceeded
+Subiect_4_6.png host0 trimite 5 pachete de tip icmp echo request la o adresa inexistenta. 
+Subiect_4_7.png router0 nu gaseste adresa in tabela de rutare. Trimite inapoi pachete icmp 
+de tip Destination Net Unreachable 
+
+Functiile folosite
+send_icmp_reply
+is_router_interface
